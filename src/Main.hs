@@ -196,7 +196,7 @@ getHomeR = do
 
 newUserForm = renderDivs $ User
     <$> areq (checkM unique textField) "Name" Nothing
-    <*> areq textField "Password" Nothing
+    <*> areq passwordField "Password" Nothing
     <*> areq emailField "E-Mail" Nothing
   where unique n = do
           clients <- runDB $ count [ UserName ==. n]
