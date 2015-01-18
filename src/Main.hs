@@ -31,6 +31,7 @@ import Yesod.Auth.HashDB (HashDBUser(..), authHashDB, getAuthIdHashDB, setPasswo
 import Database.Persist.Postgresql (PostgresConf)
 import qualified Web.ClientSession as CS
 import Network.URL
+import Utils
 
 data App = App { dbConf :: PostgresConf
                , appPool :: ConnectionPool
@@ -38,16 +39,6 @@ data App = App { dbConf :: PostgresConf
                , csKey :: CS.Key
                , randGen :: IORef SystemRNG
                }
-
-instance RedirectUrl master URL where
-  toTextUrl = return . T.pack . exportURL
-
-instance ToJSON NominalDiffTime where
-  toJSON = Number . fromRational . toRational
-
-instance FromJSON NominalDiffTime where
-  parseJSON (Number n) = return $ fromRational $ toRational n
-  parseJSON _ = mzero
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
   User
@@ -89,13 +80,6 @@ mkYesod "App" [parseRoutes|
   !/clients/#ClientId ClientR GET
 |]
 
-instance ToJSON URL where
-  toJSON = String . T.pack . exportURL
-
-instance FromJSON URL where
-  parseJSON (String t) = maybeM mzero $ importURL $ T.unpack t
-  parseJSON _ = mzero
-
 data OAuthToken = OAuthToken { tokenUntil :: UTCTime
                              , tokenClient :: ClientId
                              , tokenUser :: UserId
@@ -128,14 +112,6 @@ instance YesodAuthPersist App
 
 instance RenderMessage App FormMessage where
   renderMessage _ _ = defaultFormMessage
-
--- | Convenience function for various "maybe get" things
-shouldBe :: (a -> Maybe b) -> (Text -> Handler (Maybe a)) -> Text -> Handler b
-shouldBe t f n = ((>>= t) <$> f n) >>= maybeM (invalidArgs [n])
-
--- | 'fromMaybe', lifted for monadic actions.
-maybeM :: Monad m => m a -> Maybe a -> m a
-maybeM d = maybe d return
 
 oauthError :: Text -> Handler a
 oauthError e = sendResponseStatus H.badRequest400 $ object [ "error" .= e ]
