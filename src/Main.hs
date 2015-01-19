@@ -1,4 +1,6 @@
 import Control.Monad
+import Data.Maybe
+import Text.Read (readMaybe)
 import Data.Typeable
 import Control.Applicative ((<$>), (<*>))
 import Data.IORef
@@ -15,14 +17,17 @@ import qualified Data.ByteString.Base64.URL as B64
 import qualified Data.ByteString.Lazy as BL
 import Crypto.Random
 import Data.Aeson
+import qualified Data.Aeson.Types as AT
+import qualified Data.Vector as V
 import qualified Database.Esqueleto as E
+import qualified Database.Esqueleto.Internal.Language as E
+import qualified Database.Esqueleto.Internal.Sql as E
 import Database.Persist as DB
 import Database.Persist.TH
 import Database.Persist.Sql
 import Yesod.Core
 import Yesod.Auth
 import Yesod.Persist (YesodPersist(..), get404, defaultRunDB)
-import Yesod.Paginate
 import Yesod.Form
 import Yesod.Default.Config as Y
 import Yesod.Default.Main
@@ -33,12 +38,7 @@ import qualified Web.ClientSession as CS
 import Network.URL
 import Utils
 
-data App = App { dbConf :: PostgresConf
-               , appPool :: ConnectionPool
-               , settings :: AppConfig DefaultEnv ()
-               , csKey :: CS.Key
-               , randGen :: IORef SystemRNG
-               }
+data VCS = Git | Hg deriving (Show, Read, Eq)
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
   User
@@ -52,7 +52,30 @@ share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
     key Text
     user UserId
     UniqueClient key
+
+  Package
+    name Text
+    description Text
+    url Text
+    replacedBy PackageId Maybe
+    UniquePackage name
+
+  Group
+    name Text
+    description Text
+
+  PackageGroup
+    package PackageId
+    group GroupId
+    UniquePG package group
 |]
+
+data App = App { dbConf :: PostgresConf
+               , appPool :: ConnectionPool
+               , settings :: AppConfig DefaultEnv ()
+               , csKey :: CS.Key
+               , randGen :: IORef SystemRNG
+               }
 
 instance HashDBUser User where
   userPasswordHash = Just . userPassword
@@ -75,9 +98,13 @@ mkYesod "App" [parseRoutes|
   /oauth OAuthR GET POST
   /oauth/reply OAuthReplyR POST
   /clients ClientsR GET
-  /clients/page/#Int ClientsPageR GET
   /clients/new ClientNewR POST
   !/clients/#ClientId ClientR GET
+  /packages PackagesR GET
+  !/packages/#PackageId PackageR GET
+  /groups GroupsR GET
+  !/groups/#GroupId GroupR GET
+  /groups/#GroupId/packages GroupPackagesR GET
 |]
 
 data OAuthToken = OAuthToken { tokenUntil :: UTCTime
@@ -163,6 +190,8 @@ getHomeR = do
         <p><a href=@{UserMeR}>Profile
         <p><a href=@{ClientsR}>Clients
         <p><a href=@{AuthR LogoutR}>Logout
+        <p><a href=@{PackagesR}>Packages
+        <p><a href=@{GroupsR}>Groups
       $nothing
         <p>You are not logged in
         <p><a href=@{AuthR LoginR}>Login
@@ -221,33 +250,43 @@ getStatusR = do
     |]
     $ return $ object [ "total_users" .= c ]
 
-getClientsPageR i = do
+getSomethings :: (E.From E.SqlQuery E.SqlExpr E.SqlBackend a1, E.SqlSelect a2 a) =>
+                 Route App -> (a1 -> E.SqlQuery a2) -> (Widget -> Handler Html) -> (a -> Widget) -> (a -> [AT.Pair]) -> Handler TypedContent
+getSomethings route query layout pitem jitem = do
+  let getI d n = fromMaybe d <$> (>>= readMaybe . T.unpack) <$> lookupGetParam n
+  start <- getI 0 "start"
+  count <- getI 10 "count"
+  items' <- runDB $ E.select $ E.from $ \u -> do
+    E.limit $ fromIntegral $ count + 1
+    E.offset $ fromIntegral start
+    query u
+  let items = take count items'
+  selectRep $ do
+    provideRep $ do
+      layout [whamlet|
+              <ul>
+                $forall e <- items
+                  <li>^{pitem e}
+                $if start /= 0
+                  <p><a href="@{route}?start=0&count=#{count}">First page
+                $if length items' > count
+                  <p><a href="@{route}?start=#{start + count}&count=#{count}">Next page
+                $if start /= 0
+                  <p><a href="@{route}?start=#{min 0 (start - count)}&count=#{count}">Previous page
+             |]
+    provideRep $ return $ Array $ V.fromList $ map (object . jitem) items
+
+getClientsR = do
   uid <- requireAuthId
-  (items :: Page (Route App) (Entity Client)) <-
-    paginateWith PageConfig { pageSize = 10
-                            , currentPage = i
-                            , firstPageRoute = ClientsR
-                            , pageRoute = ClientsPageR
-                            } $ \i -> do
-      E.where_ (i E.^. ClientUser E.==. E.val uid)
-      return i
-
-  defaultLayout
-    [whamlet|
-      <form method=post action=@{ClientNewR}>
-        <button>New client
-      <ul>
-        $forall Entity id client <- pageResults items
-          <li><a href=@{ClientR id}>#{clientKey client}
-      $maybe fp <- firstPage items
-        <p><a href=@{fp}>First page
-      $maybe fp <- nextPage items
-        <p><a href=@{fp}>Next page
-      $maybe fp <- previousPage items
-        <p><a href=@{fp}>Previous page
-    |]
-
-getClientsR = getClientsPageR 1
+  getSomethings ClientsR (\x -> E.where_ (x E.^. ClientUser E.==. E.val uid) >> return x)
+    (\w -> defaultLayout
+           [whamlet|
+             <form method=post action=@{ClientNewR}>
+              <button>New client
+             ^{w}
+           |])
+    (\(Entity id client) -> [whamlet|<a href=@{ClientR id}>#{clientKey client}|])
+    (const [])
 
 getClientR cid = do
   uid <- requireAuthId
@@ -268,6 +307,77 @@ postClientNewR = do
       <p>Your client has been created.
       <p><a href=@{ClientR cid}>To the new client
     |]
+
+getSomePackages r f = do
+  void requireAnyAuthId
+  getSomethings r f defaultLayout
+    (\(Entity id pkg) -> [whamlet|<a href=@{PackageR id}>#{packageName pkg}|])
+    (\(Entity id pkg) -> [ "id" .= id
+                         , "name" .= packageName pkg
+                         ])
+
+getPackagesR = getSomePackages PackagesR return
+
+getPackageR :: PackageId -> Handler TypedContent
+getPackageR cid = do
+  void requireAnyAuthId
+  (c, p, gs) <- runDB $ do
+    c <- get404 cid
+    p <- maybe (return Nothing) (\i -> Just <$> Entity i <$> fromJust <$> get i) $ packageReplacedBy c
+    gs <- E.select $ E.from $ \(gi, g) -> do
+      E.where_ (gi E.^. PackageGroupPackage E.==. E.val cid)
+      E.where_ (gi E.^. PackageGroupGroup E.==. g E.^. GroupId)
+      return g
+    return (c, p, gs)
+  defaultLayoutJson
+    [whamlet|
+      <p>Package name: #{packageName c}
+      <p>Package URL: #{packageUrl c}
+      $maybe Entity ri rp <- p
+        <p>Replaced by:
+          <a href=@{PackageR ri}>#{packageName rp}
+      <p>Package description: #{packageDescription c}
+      $if not $ null gs
+        <p>Package in groups:
+          <ul>
+            $forall Entity gi g <- gs
+              <li><a href=@{GroupR gi}>#{groupName g}
+    |]
+    $ return $ object $ [ "name" .= packageName c
+                        , "url" .= packageUrl c
+                        , "description" .= packageDescription c
+                        , ("groups", Array $ V.fromList $ map
+                                     (\(Entity gi g) -> object [ "id" .= gi
+                                                              , "name" .= groupName g
+                                                              ]) gs)
+                        ] ++ maybe [] (\x -> [ "replaced_by" .= x ]) (packageReplacedBy c)
+
+getGroupsR = do
+  void requireAnyAuthId
+  getSomethings GroupsR return defaultLayout
+    (\(Entity id g) -> [whamlet|<a href=@{GroupR id}>#{groupName g}|])
+    (\(Entity id g) -> [ "id" .= id
+                       , "name" .= groupName g
+                       ])
+
+getGroupR cid = do
+  void requireAnyAuthId
+  c <- runDB $ get404 cid
+  defaultLayoutJson
+    [whamlet|
+      <p>Group name: #{groupName c}
+      <p>Group description: #{groupDescription c}
+      <p><a href=@{GroupPackagesR cid}>Group packages
+    |]
+    $ return $ object $ [ "name" .= groupName c
+                        , "description" .= groupDescription c
+                        ]
+
+getGroupPackagesR i = getSomePackages (GroupPackagesR i) $
+                      \p -> E.from $ \gi -> do
+                        E.where_ (gi E.^. PackageGroupGroup E.==. E.val i)
+                        E.where_ (gi E.^. PackageGroupPackage E.==. p E.^. PackageId)
+                        return p
 
 data OAuthRequest = OAuthRequest { reqClient :: ClientId
                                  , reqURL :: URL

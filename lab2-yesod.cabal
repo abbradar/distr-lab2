@@ -20,12 +20,12 @@ executable lab2-yesod
   build-depends:       base >=4.7 && <4.8
                      , text
                      , bytestring
+                     , vector
                      , yesod
                      , yesod-core
                      , yesod-form
                      , yesod-auth
                      , yesod-auth-hashdb
-                     , yesod-pagination
                      , yesod-persistent
                      , aeson
                      , persistent
@@ -55,5 +55,6 @@ executable lab2-yesod
                        ViewPatterns
                        ScopedTypeVariables
                        FlexibleInstances
+                       FlexibleContexts
                        StandaloneDeriving
                        LambdaCase
