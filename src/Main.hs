@@ -41,8 +41,6 @@ import qualified Web.ClientSession as CS
 import Network.URL
 import Utils
 
-data VCS = Git | Hg deriving (Show, Read, Eq)
-
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
   User
     name Text
@@ -125,8 +123,6 @@ instance YesodAuth App where
 
   loginDest _ = HomeR
   logoutDest _ = HomeR
-
--- TODO: Total counts
 
 -- | Like 'requireAuthId', but also accepts OAuth2 authentification.
 requireAnyAuthId :: Handler UserId
