@@ -1,0 +1,3 @@
+import GroupBackend
+
+main = runGroupBackend

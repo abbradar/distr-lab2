@@ -1,0 +1,3 @@
+import Frontend
+
+main = runFrontend
